@@ -31,7 +31,7 @@ from metaseq.dataclass import MetaseqDataclass
 from metaseq.tasks import LegacyTask, register_task
 
 try:
-    from tokenizers import ByteLevelBPETokenizer
+    from tokenizers import ByteLevelBPETokenizer, Tokenizer
 
     has_hf_tokenizers = True
 except ImportError:
@@ -53,6 +53,9 @@ class StreamingLanguageModelingConfig(MetaseqDataclass):
     )
     merges_filename: Optional[str] = field(
         default="", metadata={"help": "path to bpe-merges.txt"}
+    )
+    tokenizer_filename: Optional[str] = field(
+        default="", metadata={"help": "path to serialized tokenizer"}
     )
     end_of_document_symbol: Optional[str] = field(
         default="</s>", metadata={"help": "symbol indicating an end-of-document"}
@@ -117,9 +120,13 @@ class StreamingLanguageModelingTask(LegacyTask):
         if not has_hf_tokenizers:
             raise ImportError("Please install tokenizers with: pip install tokenizers")
 
-        self.tokenizer = ByteLevelBPETokenizer.from_file(
-            args.vocab_filename, args.merges_filename
-        )
+        if args.tokenizer_filename:
+            # use pre-serialized tokenizer if available
+            self.tokenizer = Tokenizer.from_file(args.tokenizer_filename)
+        else:
+            self.tokenizer = ByteLevelBPETokenizer.from_file(
+                args.vocab_filename, args.merges_filename
+            )
 
         if max(args.update_freq) > 1:
             raise NotImplementedError(
