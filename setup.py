@@ -136,9 +136,10 @@ def do_setup(package_data):
             # protobuf version pinned due to tensorboard not pinning a version.
             #  https://github.com/protocolbuffers/protobuf/issues/10076
             "protobuf==3.20.1",
+            "aim>=3.9.4",
             "azure-storage-blob",
             "boto3",
-            "black==22.1.0",
+            "black==22.3.0",
             "click==8.0.4",
             "cython",
             'dataclasses; python_version<"3.7"',
@@ -180,7 +181,7 @@ def do_setup(package_data):
         extras_require={
             "dev": [
                 "flake8==3.9.2",
-                "black==22.1.0",
+                "black==22.3.0",
                 # test deps
                 "iopath",
                 "transformers",

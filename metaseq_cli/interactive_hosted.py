@@ -25,13 +25,14 @@ from werkzeug.exceptions import HTTPException
 from metaseq import options
 from metaseq.dataclass.configs import MetaseqConfig
 from metaseq.dataclass.utils import convert_namespace_to_omegaconf
-from metaseq.distributed import utils as dist_utils
+from metaseq.distributed import utils as distributed_utils
 from metaseq.hub_utils import GeneratorInterface
 from metaseq.service.queue import PriorityQueueRingShard
 from metaseq.service.workers import WorkItem
 from metaseq.service.constants import (
     MAX_SEQ_LEN,
     MAX_BATCH_TOKENS,
+    MAX_BEAM,
     DEFAULT_PORT,
     TOTAL_WORLD_SIZE,
     LAUNCH_ARGS,
@@ -77,10 +78,12 @@ def batching_loop(timeout=100, max_tokens=MAX_BATCH_TOKENS):
     global BATCH_QUEUE
 
     batch = []
+    target_queue = None
     while True:
         try:
             # for now, we only have 1 worker, so can always index to shard 0
-            target_queue = BATCH_QUEUE.queue_shards[0].get_largest_queue()
+            if target_queue is None:
+                target_queue = BATCH_QUEUE.queue_shards[0].get_largest_queue()
             if not target_queue:
                 continue
             # dynamic batching: group like-sized items to reduce the cost
@@ -89,7 +92,12 @@ def batching_loop(timeout=100, max_tokens=MAX_BATCH_TOKENS):
             # accumulate the batch until it gets too big
             longest = max([item] + batch).cost
             batch_cost = longest * (len(batch) + 1)
-            if batch and batch_cost > max_tokens:
+            # overflow corresponds to whether max(prompt_len) + gen_len will
+            # fit the max sequence length
+            max_prompt_len = max(x.prompt_len for x in [item] + batch)
+            max_gen_len = max(x.gen_len for x in [item] + batch)
+            overflow = max_prompt_len + max_gen_len < MAX_SEQ_LEN
+            if batch and (batch_cost > max_tokens or overflow):
                 # we're over budget, put it back in the queue
                 target_queue.put(item)
                 raise queue.Empty
@@ -97,6 +105,7 @@ def batching_loop(timeout=100, max_tokens=MAX_BATCH_TOKENS):
                 # batch is empty or under budget
                 batch.append(item)
         except queue.Empty:
+            target_queue = None
             if batch:
                 request_object = {
                     "inputs": [],
@@ -124,11 +133,18 @@ def batching_loop(timeout=100, max_tokens=MAX_BATCH_TOKENS):
                             request_object[key] = ro[key]
                 # do the actual generations
                 request_object["seed"] = random.randint(1, 20000)
-                dist_utils.broadcast_object(
-                    request_object, src_rank=0, group=dist_utils.get_global_group()
-                )
+                if torch.distributed.is_initialized():
+                    distributed_utils.broadcast_object(
+                        request_object,
+                        src_rank=0,
+                        group=distributed_utils.get_global_group(),
+                    )
                 try:
                     generations = generator.generate(**request_object)
+                except RuntimeError:
+                    # Probably cuda died. Unfortunately, we need to hard crash
+                    # here to kick in our self-healing mechanisms.
+                    raise
                 except Exception as e:
                     # propagate any exceptions to the response so we can report it
                     generations = [e] * len(batch)
@@ -160,10 +176,12 @@ def worker_main(cfg1: MetaseqConfig, namespace_args=None):
     models = generator.load_model()  # noqa: F841
 
     logger.info(f"loaded model {cfg.distributed_training.distributed_rank}")
-    request_object = dist_utils.broadcast_object(
-        None, src_rank=0, group=dist_utils.get_global_group()
-    )
-    if torch.distributed.get_rank() == 0:
+    if torch.distributed.is_initialized():
+        request_object = distributed_utils.broadcast_object(
+            None, src_rank=0, group=distributed_utils.get_global_group()
+        )
+
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
         logger.info(f"Worker engaged! {get_my_ip()}:{port}")
         thread = threading.Thread(target=batching_loop, daemon=True)
         thread.start()
@@ -173,8 +191,8 @@ def worker_main(cfg1: MetaseqConfig, namespace_args=None):
         logger.info(f"Looping engaged! {get_my_ip()}:{port}")
         while True:
             try:
-                request_object = dist_utils.broadcast_object(
-                    None, src_rank=0, group=dist_utils.get_global_group()
+                request_object = distributed_utils.broadcast_object(
+                    None, src_rank=0, group=distributed_utils.get_global_group()
                 )
                 _ = generator.generate(**request_object)
             except Exception:
@@ -187,20 +205,36 @@ def handle_exception(e):
     # pass through HTTP errors
     if isinstance(e, HTTPException):
         return e
-    # now you're handling non-HTTP exceptions only
-    response = jsonify(
-        {
-            "error": {
-                "message": str(e),
-                "type": "oops",
-                "stacktrace": traceback.format_tb(e.__traceback__),
-            }
-        }
+
+    http_code = 400 if isinstance(e, ValueError) else 500
+    return _create_error_response(
+        str(e), http_code, stacktrace=traceback.format_tb(e.__traceback__)
     )
-    if isinstance(e, ValueError):
-        response.status = 400
-    else:
-        response.status = 500
+
+
+def _validate_key(key):
+    # denylist a few placeholders various people have used
+    if key == "":
+        return False
+    if "YOUR_NAME_HERE" in key:
+        return False
+    if "$USER" in key:
+        return False
+    if "your-key-here" in key:
+        return False
+    return True
+
+
+def _create_error_response(msg, http_code, **others):
+    error_dict = {
+        "message": msg,
+        "type": "invalid_request_error",
+        "param": None,
+        "code": None,
+        **others,
+    }
+    response = jsonify({"error": error_dict})
+    response.status = http_code
     return response
 
 
@@ -209,6 +243,10 @@ def handle_exception(e):
 @app.route("/v2/engines/<engine>/completions", methods=["POST"])
 @app.route("/engines/<engine>/completions", methods=["POST"])
 def completions(engine=None):
+    # before anything else, check that we've got a valid API key
+    if not _validate_key(request.headers.get("authorization", "")):
+        return _create_error_response("Invalid API key or API key missing.", 401)
+
     # prompt can be 4 types:
     # - str. Basic case. Return one generation.
     # - list of ints. Pretokenized. Return one generation
@@ -259,15 +297,28 @@ def completions(engine=None):
         generation_args["top_p"] = 1.0
     # beam search top n
     if "n" in generation_args:
-        generation_args["n"] = int(generation_args["n"])
+        generation_args["n"] = min(MAX_BEAM, max(1, int(generation_args["n"])))
     else:
         generation_args["n"] = 1
 
     ret_queue = queue.Queue()
     for i, prompt in enumerate(prompts):
+        gen_len = generation_args.get("max_tokens", 0)
+        if gen_len + len(prompt) + 1 > MAX_SEQ_LEN:
+            # cut off the prompt to always fit with number of generations we need
+            # +1 to always have the EOS token
+            prompt = prompt[-(MAX_SEQ_LEN - gen_len - 1) :]
         request_object = {"input": prompt, **generation_args}
-        max_len = generation_args.get("max_tokens", 0)
-        BATCH_QUEUE.put(WorkItem(len(prompt) + max_len, i, ret_queue, request_object))
+        BATCH_QUEUE.put(
+            WorkItem(
+                cost=len(prompt) + gen_len,
+                uid=i,
+                return_queue=ret_queue,
+                data=request_object,
+                prompt_len=len(prompt),
+                gen_len=gen_len,
+            )
+        )
     unordered_results = []
     for _ in prompts:
         unordered_results.append(ret_queue.get())
@@ -309,7 +360,7 @@ def cli_main():
     port = DEFAULT_PORT
     cfg = convert_namespace_to_omegaconf(args)
     cfg.distributed_training.distributed_world_size = TOTAL_WORLD_SIZE
-    dist_utils.call_main(cfg, worker_main, namespace_args=args)
+    distributed_utils.call_main(cfg, worker_main, namespace_args=args)
 
 
 if __name__ == "__main__":

@@ -294,18 +294,6 @@ class MultiheadAttention(nn.Module):
                 else:
                     assert v is not None
                     v = torch.cat([prev_value, v], dim=1)
-            prev_key_padding_mask: Optional[Tensor] = None
-            if "prev_key_padding_mask" in saved_state:
-                prev_key_padding_mask = saved_state["prev_key_padding_mask"]
-            assert k is not None and v is not None
-            key_padding_mask = MultiheadAttention._append_prev_key_padding_mask(
-                key_padding_mask=key_padding_mask,
-                prev_key_padding_mask=prev_key_padding_mask,
-                batch_size=bsz,
-                src_len=k.size(1),
-                static_kv=static_kv,
-            )
-
             saved_state["prev_key"] = k.view(bsz, self.num_heads, -1, self.head_dim)
             saved_state["prev_value"] = v.view(bsz, self.num_heads, -1, self.head_dim)
             saved_state["prev_key_padding_mask"] = key_padding_mask
@@ -398,50 +386,6 @@ class MultiheadAttention(nn.Module):
 
         return attn, attn_weights
 
-    @staticmethod
-    def _append_prev_key_padding_mask(
-        key_padding_mask: Optional[Tensor],
-        prev_key_padding_mask: Optional[Tensor],
-        batch_size: int,
-        src_len: int,
-        static_kv: bool,
-    ) -> Optional[Tensor]:
-        # saved key padding masks have shape (bsz, seq_len)
-        if prev_key_padding_mask is not None and static_kv:
-            new_key_padding_mask = prev_key_padding_mask
-        elif prev_key_padding_mask is not None and key_padding_mask is not None:
-            new_key_padding_mask = torch.cat(
-                [prev_key_padding_mask.float(), key_padding_mask.float()], dim=1
-            )
-        # During incremental decoding, as the padding token enters and
-        # leaves the frame, there will be a time when prev or current
-        # is None
-        elif prev_key_padding_mask is not None:
-            if src_len > prev_key_padding_mask.size(1):
-                filler = torch.zeros(
-                    (batch_size, src_len - prev_key_padding_mask.size(1)),
-                    device=prev_key_padding_mask.device,
-                )
-                new_key_padding_mask = torch.cat(
-                    [prev_key_padding_mask.float(), filler.float()], dim=1
-                )
-            else:
-                new_key_padding_mask = prev_key_padding_mask.float()
-        elif key_padding_mask is not None:
-            if src_len > key_padding_mask.size(1):
-                filler = torch.zeros(
-                    (batch_size, src_len - key_padding_mask.size(1)),
-                    device=key_padding_mask.device,
-                )
-                new_key_padding_mask = torch.cat(
-                    [filler.float(), key_padding_mask.float()], dim=1
-                )
-            else:
-                new_key_padding_mask = key_padding_mask.float()
-        else:
-            new_key_padding_mask = prev_key_padding_mask
-        return new_key_padding_mask
-
     @torch.jit.export
     def reorder_incremental_state(
         self,
@@ -481,34 +425,3 @@ class MultiheadAttention(nn.Module):
 
     def apply_sparse_mask(self, attn_weights, tgt_len: int, src_len: int, bsz: int):
         return attn_weights
-
-    def upgrade_state_dict_named(self, state_dict, name):
-        prefix = name + "." if name != "" else ""
-        items_to_add = {}
-        keys_to_remove = []
-        for k in state_dict.keys():
-            if k.endswith(prefix + "in_proj_weight"):
-                # in_proj_weight used to be q + k + v with same dimensions
-                dim = int(state_dict[k].shape[0] / 3)
-                items_to_add[prefix + "q_proj.weight"] = state_dict[k][:dim]
-                items_to_add[prefix + "k_proj.weight"] = state_dict[k][dim : 2 * dim]
-                items_to_add[prefix + "v_proj.weight"] = state_dict[k][2 * dim :]
-
-                keys_to_remove.append(k)
-
-                k_bias = prefix + "in_proj_bias"
-                if k_bias in state_dict.keys():
-                    dim = int(state_dict[k].shape[0] / 3)
-                    items_to_add[prefix + "q_proj.bias"] = state_dict[k_bias][:dim]
-                    items_to_add[prefix + "k_proj.bias"] = state_dict[k_bias][
-                        dim : 2 * dim
-                    ]
-                    items_to_add[prefix + "v_proj.bias"] = state_dict[k_bias][2 * dim :]
-
-                    keys_to_remove.append(prefix + "in_proj_bias")
-
-        for k in keys_to_remove:
-            del state_dict[k]
-
-        for key, value in items_to_add.items():
-            state_dict[key] = value
