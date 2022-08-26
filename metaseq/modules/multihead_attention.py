@@ -173,6 +173,11 @@ class MultiheadAttention(nn.Module):
                 assert value is not None
                 assert src_len, bsz == value.shape[:2]
 
+        # if using a 3D attention mask (separate mask for each element of the batch)
+        if len(attn_mask.size()) == 3:
+            # repeat for each attention head
+            attn_mask = attn_mask.repeat_interleave(self.num_heads, dim=0)
+
         if (
             not self.onnx_trace
             and incremental_state is None
@@ -243,6 +248,9 @@ class MultiheadAttention(nn.Module):
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
             if attn_mask is not None:
+                import ipdb
+
+                ipdb.set_trace()
                 attn_mask = torch.cat(
                     [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
                 )
@@ -318,6 +326,9 @@ class MultiheadAttention(nn.Module):
             k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
             v = torch.cat([v, v.new_zeros((v.size(0), 1) + v.size()[2:])], dim=1)
             if attn_mask is not None:
+                import ipdb
+
+                ipdb.set_trace()
                 attn_mask = torch.cat(
                     [attn_mask, attn_mask.new_zeros(attn_mask.size(0), 1)], dim=1
                 )
@@ -342,7 +353,10 @@ class MultiheadAttention(nn.Module):
             # we may get NaN when adding attn_mask or computing softmax.
             attn_weights = torch.nan_to_num(attn_weights)
 
-            attn_mask = attn_mask.unsqueeze(0)
+            # do not insert an extra dimension for 3D attention masks
+            if len(attn_mask.size()) < 3:
+                attn_mask = attn_mask.unsqueeze(0)
+
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
             attn_weights += attn_mask

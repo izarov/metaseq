@@ -70,6 +70,13 @@ class StreamingLanguageModelingConfig(MetaseqDataclass):
             'If set to "eos", includes only one sentence per sample.'
         },
     )
+    non_causal_decoder: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Change decoder attention mask to be non-causal, ala prefix LM where "
+            "the model can attend to the full source/context."
+        },
+    )
     tokens_per_sample: int = field(
         default=1024,
         metadata={"help": "max number of tokens per sample for LM dataset"},

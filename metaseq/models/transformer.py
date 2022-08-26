@@ -554,6 +554,7 @@ class TransformerDecoder(IncrementalDecoder):
         src_lengths: Optional[Any] = None,
         token_embeddings: Optional[torch.Tensor] = None,
         self_attn_padding_mask: Optional[Tensor] = None,
+        target_start: Optional[Tensor] = None,
     ):
         """
         Includes several features from "Jointly Learning to Align and
@@ -572,13 +573,14 @@ class TransformerDecoder(IncrementalDecoder):
                 default `None` will recompute embeddings
             self_attn_padding_mask (torch.Tensor, optional): precomputed padding
                 mask for self-attention (default None will recompute mask)
-
+            target_start (torch.Tensor, optional): index of where the target starts
+                for each sequence in the batch. Used to optinally apply a
+                non-causal mask to the source for instruction tuning
         Returns:
             tuple:
                 - the decoder's output of shape `(batch, tgt_len, vocab)`
                 - a dictionary with any model-specific outputs
         """
-
         # see IncrementalDecoder for important information about
         # incremental state
         x, extra = self.extract_features(
@@ -587,6 +589,7 @@ class TransformerDecoder(IncrementalDecoder):
             incremental_state=incremental_state,
             token_embeddings=token_embeddings,
             self_attn_padding_mask=self_attn_padding_mask,
+            target_start=target_start,
         )
         if not features_only:
             x = self.output_layer(x)
@@ -599,6 +602,7 @@ class TransformerDecoder(IncrementalDecoder):
         incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
         token_embeddings: Optional[torch.Tensor] = None,
         self_attn_padding_mask: Optional[Tensor] = None,
+        target_start: Optional[Tensor] = None,
     ):
         return self.extract_features_scriptable(
             prev_output_tokens,
@@ -606,6 +610,7 @@ class TransformerDecoder(IncrementalDecoder):
             incremental_state=incremental_state,
             token_embeddings=token_embeddings,
             self_attn_padding_mask=self_attn_padding_mask,
+            target_start=target_start,
         )
 
     def extract_features_scriptable(
@@ -615,6 +620,7 @@ class TransformerDecoder(IncrementalDecoder):
         incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
         token_embeddings: Optional[Tensor] = None,
         self_attn_padding_mask: Optional[Tensor] = None,
+        target_start: Optional[Tensor] = None,
     ):
         """
         A scriptable subclass of this class has an extract_features method and calls
@@ -639,6 +645,16 @@ class TransformerDecoder(IncrementalDecoder):
         # incremental state. Note that it may be an empty dictionary.
         if not incremental_state:
             self_attn_mask = self.buffered_future_mask(x, prev_output_tokens)
+            # apply non-causal mask if target_start is set
+            if target_start is not None:
+                bsz = target_start.size(0)
+                self_attn_mask = self_attn_mask.repeat(bsz, 1, 1)
+                for i in range(bsz):
+                    first_non_pad_element = target_start[i]
+                    # do not mask (so attn mask of 0) all elements that are in the source/context
+                    self_attn_mask[
+                        i, :first_non_pad_element, :first_non_pad_element
+                    ] = 0.0
         else:
             self_attn_mask = None
 

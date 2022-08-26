@@ -79,6 +79,7 @@ class StreamingFinetuneLanguageModelingTask(StreamingLanguageModelingTask):
         ):
             if not file.endswith(".jsonl"):
                 continue
+
             datasets.append(
                 JsonlDataset(
                     path=os.path.join(self.args.data, split, cur_shard_str, file),
@@ -141,12 +142,27 @@ class StreamingFinetuneLanguageModelingTask(StreamingLanguageModelingTask):
                 f"found {n_duplicate}/{ids.numel()} duplicate document IDs in the same batch!"
             )
 
+        net_input = {
+            "src_tokens": input,
+        }
+
+        if self.args.non_causal_decoder:
+            if not self.args.sample_break_mode.startswith("eos"):
+                logger.warn(
+                    f"non-causal-decoder is enabled, but sample-break-mode is set to {self.args.sample_break_mode}. "
+                    "This is not supported, the prefix attention mask will only cover the first example in a sequence."
+                )
+            # get first non-padding element - padding is used to replace source tokens in target
+            # so target sequence starts where padding ends
+            non_padded_target = target != self.source_dictionary.pad()
+            _, first_non_pad_elements = torch.max(non_padded_target, dim=1)
+            # add one as target is shifted by one
+            net_input["target_start"] = first_non_pad_elements + 1
+
         # metaseq expects batches to have the following structure
         return {
             "id": ids,
-            "net_input": {
-                "src_tokens": input,
-            },
+            "net_input": net_input,
             "target": target,
             "nsentences": input.size(0),
             "ntokens": input.ne(self.dictionary.pad()).sum(),
