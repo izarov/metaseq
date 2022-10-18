@@ -135,7 +135,7 @@ def do_setup(package_data):
         install_requires=[
             # protobuf version pinned due to tensorboard not pinning a version.
             #  https://github.com/protocolbuffers/protobuf/issues/10076
-            "protobuf==3.20.1",
+            "protobuf==3.20.2",
             "aim>=3.9.4",
             "azure-storage-blob",
             "boto3",
@@ -159,6 +159,7 @@ def do_setup(package_data):
             "omegaconf<=2.1.1",
             "pre-commit",
             "pytest",
+            "pytest-regressions",
             "regex",
             "sklearn",  # for evals
             "sacrebleu",  # for evals
@@ -194,10 +195,10 @@ def do_setup(package_data):
         test_suite="tests",
         entry_points={
             "console_scripts": [
-                "metaseq-train = metaseq_cli.train:cli_main",
-                "metaseq-validate = metaseq_cli.validate:cli_main",
+                "metaseq-train = metaseq.cli.train:cli_main",
+                "metaseq-validate = metaseq.cli.validate:cli_main",
                 "opt-baselines = metaseq.launcher.opt_baselines:cli_main",
-                "metaseq-api-local = metaseq_cli.interactive_hosted:cli_main",
+                "metaseq-api-local = metaseq.cli.interactive_hosted:cli_main",
             ],
         },
         cmdclass=cmdclass,

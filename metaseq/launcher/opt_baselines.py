@@ -14,7 +14,6 @@ from metaseq.launcher.opt_job_constants import (
     TOTAL_TRAIN_TOKENS,
     TOTAL_WARMUP_TOKENS,
     MODEL_SIZES,
-    DATA_LOCATIONS,
     VALID_SUBSETS,
 )
 from metaseq.launcher.sweep import (
@@ -22,6 +21,12 @@ from metaseq.launcher.sweep import (
     get_env_from_args,
     main as sweep_main,
 )
+
+try:
+    # internal logic denoting where data locations are
+    from metaseq_internal.constants import DATA_LOCATIONS
+except ImportError:
+    from metaseq.launcher.opt_job_constants import DATA_LOCATIONS
 
 # have to do this at the module level, unfortunately; unable to use args.<env>
 for _cluster, _folder in DATA_LOCATIONS.items():
@@ -143,7 +148,8 @@ def get_grid(args):
             hyperparam(
                 "--dict-size", 51200 - 4
             ),  # TODO(susan): what is this -4 sorcery? relic of more nmt things?
-            hyperparam("--no-save"),
+            hyperparam("--save-interval-epochs", 0),
+            hyperparam("--save-interval-updates", 0),
         ]
         total_updates = 50
         warmup_updates = 50
@@ -156,18 +162,21 @@ def get_grid(args):
 
     no_save_params = args.no_save_dir
     args.snapshot_code = True
+
+    if not args.benchmark:
+        grid += [
+            hyperparam(
+                "--valid-subset", ",".join(f"valid/{ss}" for ss in valid_subsets)
+            ),
+            hyperparam("--save-interval-updates", 2000),
+        ]
+
     grid += [
         hyperparam("--train-subset", "train"),
-        hyperparam("--valid-subset", ",".join(f"valid/{ss}" for ss in valid_subsets)),
         hyperparam("--ignore-unused-valid-subsets"),
         hyperparam("--num-workers", 8),
         hyperparam("--num-workers-valid", 1),
         hyperparam("--validate-interval-updates", 2000),
-        hyperparam("--save-interval-updates", 2000),
-        hyperparam(
-            "--no-epoch-checkpoints"
-        ),  # only save checkpoints based on num steps
-        hyperparam("--no-best-checkpoints"),  # don't save checkpoint_best.pt
         hyperparam(
             "--memory-efficient-fp16",
             save_dir_key=lambda val: "me_fp16" if not no_save_params else "",
